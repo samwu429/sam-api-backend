@@ -6,32 +6,38 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 增加一行日志，方便你在 Render 的 Logs 频道看有没有连上
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_KEY);
+// 只要你在 Render 填了 GEMINI_KEY，这里就能读到
+const API_KEY = process.env.GEMINI_KEY;
 
-const SYSTEM_PROMPT = `You are Sam Wu's professional AI assistant. 
-Data: UofT Math/Stats/CS student, Logistics Intern, Microsoft JS Certified.
-Answer only about Sam Wu.`;
+const systemInstruction = `You are a professional AI assistant for Sam Wu. 
+Only answer questions about his resume and professional background.`;
 
 app.post('/chat', async (req, res) => {
     try {
-        const userMsg = req.body.message;
-        
-        // 尝试使用 gemini-1.5-flash，如果你的 Key 报错，后端会自动尝试切换
+        if (!API_KEY) {
+            return res.json({ reply: "🔴 后端配置错误：环境变量 GEMINI_KEY 为空，请检查 Render 设置。" });
+        }
+
+        const genAI = new GoogleGenerativeAI(API_KEY);
+        // 使用最稳妥的模型名称
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        
-        const prompt = `${SYSTEM_PROMPT}\n\nUser Question: ${userMsg}`;
+
+        const userMsg = req.body.message;
+        const prompt = `${systemInstruction}\n\nUser: ${userMsg}`;
+
         const result = await model.generateContent(prompt);
         const response = await result.response;
         const text = response.text();
 
         res.json({ reply: text });
     } catch (error) {
-        // 【核心改进】如果报错，把报错详情打印出来传给前端，咱们当场抓包
-        console.error("AI Error Detail:", error.message);
-        res.json({ reply: "🔴 后端连接 Google 失败: " + error.message });
+        // 这行会在 Render 的 Logs 里显示
+        console.error("DEBUG ERROR:", error.message);
+        
+        // 这行会直接传给你的网页气泡，让你看看到底怎么了
+        res.json({ reply: `🔴 Google 拒绝了请求。原因: ${error.message}` });
     }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server live on port ${PORT}`));
+app.listen(PORT, () => console.log(`Backend is running on port ${PORT}`));
