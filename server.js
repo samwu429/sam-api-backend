@@ -59,7 +59,7 @@ STRICT RESPONSE RULES:
 app.post('/chat', async (req, res) => {
     try {
         const userMsg = req.body.message;
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
         
         // 拼接成最完美的 Prompt
         const fullPrompt = `
