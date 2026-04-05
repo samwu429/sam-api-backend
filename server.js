@@ -73,5 +73,58 @@ app.post('/chat', async (req, res) => {
     }
 });
 
+const fs = require('fs');
+const path = require('path');
+const dataFile = path.join(__dirname, 'data.json');
+if (!fs.existsSync(dataFile)) { fs.writeFileSync(dataFile, JSON.stringify({ photos: [], testimonials: [] })); }
+function readData() { return JSON.parse(fs.readFileSync(dataFile, 'utf8')); }
+function writeData(data) { fs.writeFileSync(dataFile, JSON.stringify(data, null, 2)); }
+
+const checkVisitorPwd = (req, res, next) => {
+    const pwd = req.headers['x-password'];
+    if (pwd === '6429' || pwd === '0429') next();
+    else res.status(401).json({ error: 'Unauthorized' });
+};
+const checkAdminPwd = (req, res, next) => {
+    const pwd = req.headers['x-password'];
+    if (pwd === '0429') next();
+    else res.status(401).json({ error: 'Unauthorized Admin' });
+};
+
+app.get('/api/hidden/photos', checkVisitorPwd, (req, res) => { res.json(readData().photos); });
+app.get('/api/hidden/testimonials', checkVisitorPwd, (req, res) => { res.json(readData().testimonials); });
+
+app.post('/api/hidden/testimonials', checkVisitorPwd, (req, res) => {
+    const { name, linkedin, relationship, comment } = req.body;
+    if (!name || !relationship || !comment) return res.status(400).json({error: 'Missing fields'});
+    const data = readData();
+    data.testimonials.unshift({ id: Date.now().toString(), name, linkedin, relationship, comment, timestamp: new Date().toISOString() });
+    writeData(data);
+    res.json({ success: true });
+});
+
+app.post('/api/admin/photos', checkAdminPwd, (req, res) => {
+    const { url, category } = req.body;
+    if (!url || !category) return res.status(400).json({error: 'Missing fields'});
+    const data = readData();
+    data.photos.unshift({ id: Date.now().toString(), url, category, timestamp: new Date().toISOString() });
+    writeData(data);
+    res.json({ success: true });
+});
+
+app.delete('/api/admin/photos/:id', checkAdminPwd, (req, res) => {
+    const data = readData();
+    data.photos = data.photos.filter(p => p.id !== req.params.id);
+    writeData(data);
+    res.json({ success: true });
+});
+
+app.delete('/api/admin/testimonials/:id', checkAdminPwd, (req, res) => {
+    const data = readData();
+    data.testimonials = data.testimonials.filter(t => t.id !== req.params.id);
+    writeData(data);
+    res.json({ success: true });
+});
+
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Backend live on Gemini 2.5 Flash!`));
