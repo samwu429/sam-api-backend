@@ -91,6 +91,16 @@ const checkAdminPwd = (req, res, next) => {
     else res.status(401).json({ error: 'Unauthorized Admin' });
 };
 
+app.get('/api/public/testimonials', (req, res) => {
+    const data = readData().testimonials.map(t => ({
+        id: t.id,
+        relationship: t.relationship,
+        comment: t.comment,
+        timestamp: t.timestamp
+    }));
+    res.json(data);
+});
+
 app.get('/api/hidden/photos', checkVisitorPwd, (req, res) => { res.json(readData().photos); });
 app.get('/api/hidden/testimonials', checkVisitorPwd, (req, res) => { res.json(readData().testimonials); });
 
