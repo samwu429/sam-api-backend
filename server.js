@@ -3,7 +3,20 @@ const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
-app.use(cors());
+
+// 安全防盗刷：配置 CORS 白名单
+const allowedOrigins = ['https://samwu429.github.io', 'http://localhost:3000', 'http://127.0.0.1:3000'];
+app.use(cors({
+    origin: function (origin, callback) {
+        // 允许没有 origin 的请求（比如服务器内部请求，或者 curl）以及白名单内的请求
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    }
+}));
+
 app.use(express.json({ limit: '10mb' }));
 
 // 唤醒接口 (解决预热报404的问题)
