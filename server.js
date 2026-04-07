@@ -4,11 +4,10 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 
-// 安全防盗刷：配置 CORS 白名单
+// CORS Configuration
 const allowedOrigins = ['https://samwu429.github.io', 'http://localhost:3000', 'http://127.0.0.1:3000'];
 app.use(cors({
     origin: function (origin, callback) {
-        // 允许没有 origin 的请求（比如服务器内部请求，或者 curl）以及白名单内的请求
         if (!origin || allowedOrigins.includes(origin)) {
             callback(null, true);
         } else {
@@ -19,12 +18,12 @@ app.use(cors({
 
 app.use(express.json({ limit: '10mb' }));
 
-// 唤醒接口 (解决预热报404的问题)
+// Keepalive endpoint
 app.get('/ping', (req, res) => res.send('pong'));
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_KEY);
 
-// ======================== 你的超级全能知识库 (彻底懂你版) ========================
+// ======================== Knowledge Base ========================
 const SAM_RESUME_KNOWLEDGE_BASE = `
 ROLE: You are the exclusive Professional AI Representative for Yihang (Sam) Wu. 
 TONE: Confident, professional, persuasive, and meticulous.
@@ -65,12 +64,10 @@ STRICT RESPONSE RULES:
 app.post('/chat', async (req, res) => {
     try {
         const userMsg = req.body.message;
-        const history = req.body.history || []; // 接收前端传来的历史记录
+        const history = req.body.history || [];
         
-        // 【核心修正】严格使用 2.5 版本
         const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
         
-        // 拼接历史对话上下文
         let conversation = history.map(h => `${h.role === 'AI' ? 'Sam Agent' : 'User'}: ${h.text}`).join('\n');
         
         const fullPrompt = `
@@ -92,25 +89,24 @@ app.post('/chat', async (req, res) => {
         res.json({ reply: text });
     } catch (error) {
         console.error("DEBUG:", error.message);
-        res.json({ reply: `🔴 2.5版本请求失败: ${error.message}` });
+        res.json({ reply: `Service temporarily unavailable. Please try again later. (${error.message})` });
     }
 });
 
 const mongoose = require('mongoose');
 
-// ======================== MongoDB 连接设置 ========================
-// 强烈建议不要把带有密码的链接写在代码里，而是通过 Render 的环境变量注入
+// ======================== MongoDB Configuration ========================
 const MONGODB_URI = process.env.MONGODB_URI;
 
 if (MONGODB_URI) {
     mongoose.connect(MONGODB_URI)
-        .then(() => console.log('✅ Connected to MongoDB Atlas!'))
-        .catch(err => console.error('❌ MongoDB connection error:', err));
+        .then(() => console.log('Connected to MongoDB Atlas!'))
+        .catch(err => console.error('MongoDB connection error:', err));
 } else {
-    console.warn('⚠️ MONGODB_URI environment variable is missing!');
+    console.warn('MONGODB_URI environment variable is missing!');
 }
 
-// ======================== MongoDB 数据模型 ========================
+// ======================== MongoDB Models ========================
 const testimonialSchema = new mongoose.Schema({
     id: String,
     name: String,
@@ -131,7 +127,6 @@ const Photo = mongoose.model('Photo', photoSchema);
 
 const checkVisitorPwd = (req, res, next) => {
     const pwd = req.headers['x-password'];
-    // 使用环境变量，如果没配暂时回退到硬编码（强烈建议在Render配好后删掉硬编码）
     const visitorEnv = process.env.VISITOR_PASSWORD || '6429';
     const adminEnv = process.env.ADMIN_PASSWORD || '0429';
     if (pwd === visitorEnv || pwd === adminEnv) next();
