@@ -6,6 +6,9 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
+// 唤醒接口 (解决预热报404的问题)
+app.get('/ping', (req, res) => res.send('pong'));
+
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_KEY);
 
 // ======================== 你的超级全能知识库 (彻底懂你版) ========================
@@ -49,13 +52,20 @@ STRICT RESPONSE RULES:
 app.post('/chat', async (req, res) => {
     try {
         const userMsg = req.body.message;
+        const history = req.body.history || []; // 接收前端传来的历史记录
         
         // 【核心修正】严格使用 2.5 版本
         const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
         
+        // 拼接历史对话上下文
+        let conversation = history.map(h => `${h.role === 'AI' ? 'Sam Agent' : 'User'}: ${h.text}`).join('\n');
+        
         const fullPrompt = `
         You have the following knowledge about Sam Wu:
         ${SAM_RESUME_KNOWLEDGE_BASE}
+        
+        Previous Conversation (Context):
+        ${conversation}
         
         User's Request: "${userMsg}"
         
@@ -82,12 +92,16 @@ function writeData(data) { fs.writeFileSync(dataFile, JSON.stringify(data, null,
 
 const checkVisitorPwd = (req, res, next) => {
     const pwd = req.headers['x-password'];
-    if (pwd === '6429' || pwd === '0429') next();
+    // 使用环境变量，如果没配暂时回退到硬编码（强烈建议在Render配好后删掉硬编码）
+    const visitorEnv = process.env.VISITOR_PASSWORD || '6429';
+    const adminEnv = process.env.ADMIN_PASSWORD || '0429';
+    if (pwd === visitorEnv || pwd === adminEnv) next();
     else res.status(401).json({ error: 'Unauthorized' });
 };
 const checkAdminPwd = (req, res, next) => {
     const pwd = req.headers['x-password'];
-    if (pwd === '0429') next();
+    const adminEnv = process.env.ADMIN_PASSWORD || '0429';
+    if (pwd === adminEnv) next();
     else res.status(401).json({ error: 'Unauthorized Admin' });
 };
 
