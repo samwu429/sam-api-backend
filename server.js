@@ -83,12 +83,38 @@ app.post('/chat', async (req, res) => {
     }
 });
 
-const fs = require('fs');
-const path = require('path');
-const dataFile = path.join(__dirname, 'data.json');
-if (!fs.existsSync(dataFile)) { fs.writeFileSync(dataFile, JSON.stringify({ photos: [], testimonials: [] })); }
-function readData() { return JSON.parse(fs.readFileSync(dataFile, 'utf8')); }
-function writeData(data) { fs.writeFileSync(dataFile, JSON.stringify(data, null, 2)); }
+const mongoose = require('mongoose');
+
+// ======================== MongoDB 连接设置 ========================
+// 强烈建议不要把带有密码的链接写在代码里，而是通过 Render 的环境变量注入
+const MONGODB_URI = process.env.MONGODB_URI;
+
+if (MONGODB_URI) {
+    mongoose.connect(MONGODB_URI)
+        .then(() => console.log('✅ Connected to MongoDB Atlas!'))
+        .catch(err => console.error('❌ MongoDB connection error:', err));
+} else {
+    console.warn('⚠️ MONGODB_URI environment variable is missing!');
+}
+
+// ======================== MongoDB 数据模型 ========================
+const testimonialSchema = new mongoose.Schema({
+    id: String,
+    name: String,
+    linkedin: String,
+    relationship: String,
+    comment: String,
+    timestamp: String
+});
+const Testimonial = mongoose.model('Testimonial', testimonialSchema);
+
+const photoSchema = new mongoose.Schema({
+    id: String,
+    url: String,
+    category: String,
+    timestamp: String
+});
+const Photo = mongoose.model('Photo', photoSchema);
 
 const checkVisitorPwd = (req, res, next) => {
     const pwd = req.headers['x-password'];
@@ -105,49 +131,87 @@ const checkAdminPwd = (req, res, next) => {
     else res.status(401).json({ error: 'Unauthorized Admin' });
 };
 
-app.get('/api/public/testimonials', (req, res) => {
-    const data = readData().testimonials.map(t => ({
-        id: t.id,
-        relationship: t.relationship,
-        comment: t.comment,
-        timestamp: t.timestamp
-    }));
-    res.json(data);
+app.get('/api/public/testimonials', async (req, res) => {
+    try {
+        const testimonials = await Testimonial.find().sort({ _id: -1 });
+        const data = testimonials.map(t => ({
+            id: t.id,
+            relationship: t.relationship,
+            comment: t.comment,
+            timestamp: t.timestamp
+        }));
+        res.json(data);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
-app.get('/api/hidden/photos', checkVisitorPwd, (req, res) => { res.json(readData().photos); });
-app.get('/api/hidden/testimonials', checkVisitorPwd, (req, res) => { res.json(readData().testimonials); });
-
-app.post('/api/hidden/testimonials', checkVisitorPwd, (req, res) => {
-    const { name, linkedin, relationship, comment } = req.body;
-    if (!name || !relationship || !comment) return res.status(400).json({error: 'Missing fields'});
-    const data = readData();
-    data.testimonials.unshift({ id: Date.now().toString(), name, linkedin, relationship, comment, timestamp: new Date().toISOString() });
-    writeData(data);
-    res.json({ success: true });
+app.get('/api/hidden/photos', checkVisitorPwd, async (req, res) => { 
+    try {
+        const photos = await Photo.find().sort({ _id: -1 });
+        res.json(photos); 
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
-app.post('/api/admin/photos', checkAdminPwd, (req, res) => {
-    const { url, category } = req.body;
-    if (!url || !category) return res.status(400).json({error: 'Missing fields'});
-    const data = readData();
-    data.photos.unshift({ id: Date.now().toString(), url, category, timestamp: new Date().toISOString() });
-    writeData(data);
-    res.json({ success: true });
+app.get('/api/hidden/testimonials', checkVisitorPwd, async (req, res) => { 
+    try {
+        const testimonials = await Testimonial.find().sort({ _id: -1 });
+        res.json(testimonials); 
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
-app.delete('/api/admin/photos/:id', checkAdminPwd, (req, res) => {
-    const data = readData();
-    data.photos = data.photos.filter(p => p.id !== req.params.id);
-    writeData(data);
-    res.json({ success: true });
+app.post('/api/hidden/testimonials', checkVisitorPwd, async (req, res) => {
+    try {
+        const { name, linkedin, relationship, comment } = req.body;
+        if (!name || !relationship || !comment) return res.status(400).json({error: 'Missing fields'});
+        
+        await Testimonial.create({ 
+            id: Date.now().toString(), 
+            name, linkedin, relationship, comment, 
+            timestamp: new Date().toISOString() 
+        });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
-app.delete('/api/admin/testimonials/:id', checkAdminPwd, (req, res) => {
-    const data = readData();
-    data.testimonials = data.testimonials.filter(t => t.id !== req.params.id);
-    writeData(data);
-    res.json({ success: true });
+app.post('/api/admin/photos', checkAdminPwd, async (req, res) => {
+    try {
+        const { url, category } = req.body;
+        if (!url || !category) return res.status(400).json({error: 'Missing fields'});
+        
+        await Photo.create({ 
+            id: Date.now().toString(), 
+            url, category, 
+            timestamp: new Date().toISOString() 
+        });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.delete('/api/admin/photos/:id', checkAdminPwd, async (req, res) => {
+    try {
+        await Photo.deleteOne({ id: req.params.id });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.delete('/api/admin/testimonials/:id', checkAdminPwd, async (req, res) => {
+    try {
+        await Testimonial.deleteOne({ id: req.params.id });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 const PORT = process.env.PORT || 10000;
