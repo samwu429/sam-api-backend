@@ -16,7 +16,7 @@ app.use(cors({
     }
 }));
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '25mb' }));
 
 // Keepalive endpoint
 app.get('/ping', (req, res) => res.send('pong'));
@@ -125,6 +125,36 @@ const photoSchema = new mongoose.Schema({
 });
 const Photo = mongoose.model('Photo', photoSchema);
 
+const publicationSchema = new mongoose.Schema({
+    id: String,
+    title: String,
+    authors: String,
+    venue: String,
+    year: Number,
+    link: String,
+    abstract: String,
+    sortOrder: { type: Number, default: 0 }
+});
+const Publication = mongoose.model('Publication', publicationSchema);
+
+const blogPostSchema = new mongoose.Schema({
+    id: String,
+    text: String,
+    images: [String],
+    displayYear: Number,
+    displayMonth: Number,
+    displayDay: Number,
+    timestamp: String
+});
+const BlogPost = mongoose.model('BlogPost', blogPostSchema);
+
+function blogSortDate(p) {
+    const y = Number(p.displayYear) || 1970;
+    const m = Math.min(12, Math.max(1, Number(p.displayMonth) || 1));
+    const d = Math.min(31, Math.max(1, Number(p.displayDay) || 1));
+    return new Date(y, m - 1, d).getTime();
+}
+
 const checkVisitorPwd = (req, res, next) => {
     const pwd = req.headers['x-password'];
     const visitorEnv = process.env.VISITOR_PASSWORD || '6429';
@@ -138,6 +168,173 @@ const checkAdminPwd = (req, res, next) => {
     if (pwd === adminEnv) next();
     else res.status(401).json({ error: 'Unauthorized Admin' });
 };
+
+app.get('/api/admin/ping', checkAdminPwd, (req, res) => {
+    res.json({ ok: true });
+});
+
+app.get('/api/public/publications', async (req, res) => {
+    try {
+        const rows = await Publication.find().sort({ sortOrder: -1, year: -1, _id: -1 });
+        res.json(rows.map(p => ({
+            id: p.id,
+            title: p.title,
+            authors: p.authors,
+            venue: p.venue,
+            year: p.year,
+            link: p.link,
+            abstract: p.abstract
+        })));
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/public/blog', async (req, res) => {
+    try {
+        const rows = await BlogPost.find();
+        const sorted = rows.sort((a, b) => blogSortDate(b) - blogSortDate(a));
+        res.json(sorted.map(p => ({
+            id: p.id,
+            text: p.text,
+            images: p.images || [],
+            displayYear: p.displayYear,
+            displayMonth: p.displayMonth,
+            displayDay: p.displayDay,
+            timestamp: p.timestamp
+        })));
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/admin/publications', checkAdminPwd, async (req, res) => {
+    try {
+        const rows = await Publication.find().sort({ sortOrder: -1, year: -1, _id: -1 });
+        res.json(rows);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/admin/publications', checkAdminPwd, async (req, res) => {
+    try {
+        const { title, authors, venue, year, link, abstract, sortOrder } = req.body;
+        if (!title || String(title).trim() === '') {
+            return res.status(400).json({ error: 'Title required' });
+        }
+        await Publication.create({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+            title: String(title).trim(),
+            authors: authors != null ? String(authors) : '',
+            venue: venue != null ? String(venue) : '',
+            year: year != null && year !== '' ? Number(year) : null,
+            link: link != null ? String(link).trim() : '',
+            abstract: abstract != null ? String(abstract) : '',
+            sortOrder: sortOrder != null && sortOrder !== '' ? Number(sortOrder) : 0
+        });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.put('/api/admin/publications/:id', checkAdminPwd, async (req, res) => {
+    try {
+        const { title, authors, venue, year, link, abstract, sortOrder } = req.body;
+        const id = req.params.id;
+        const update = {};
+        if (title != null) update.title = String(title).trim();
+        if (authors != null) update.authors = String(authors);
+        if (venue != null) update.venue = String(venue);
+        if (year !== undefined) update.year = year === '' || year == null ? null : Number(year);
+        if (link != null) update.link = String(link).trim();
+        if (abstract != null) update.abstract = String(abstract);
+        if (sortOrder !== undefined) update.sortOrder = sortOrder === '' || sortOrder == null ? 0 : Number(sortOrder);
+        await Publication.updateOne({ id }, { $set: update });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.delete('/api/admin/publications/:id', checkAdminPwd, async (req, res) => {
+    try {
+        await Publication.deleteOne({ id: req.params.id });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/admin/blog', checkAdminPwd, async (req, res) => {
+    try {
+        const rows = await BlogPost.find();
+        const sorted = rows.sort((a, b) => blogSortDate(b) - blogSortDate(a));
+        res.json(sorted);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/admin/blog', checkAdminPwd, async (req, res) => {
+    try {
+        const { text, images, displayYear, displayMonth, displayDay } = req.body;
+        const imgs = Array.isArray(images) ? images.filter(Boolean) : [];
+        if (!imgs.length) {
+            return res.status(400).json({ error: 'At least one image required' });
+        }
+        const y = Number(displayYear);
+        const m = Number(displayMonth);
+        const d = Number(displayDay);
+        if (!y || !m || !d) {
+            return res.status(400).json({ error: 'Display date (Y/M/D) required' });
+        }
+        await BlogPost.create({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+            text: text != null ? String(text) : '',
+            images: imgs,
+            displayYear: y,
+            displayMonth: m,
+            displayDay: d,
+            timestamp: new Date().toISOString()
+        });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.put('/api/admin/blog/:id', checkAdminPwd, async (req, res) => {
+    try {
+        const { text, images, displayYear, displayMonth, displayDay } = req.body;
+        const id = req.params.id;
+        const update = {};
+        if (text != null) update.text = String(text);
+        if (images != null) {
+            if (!Array.isArray(images) || !images.length) {
+                return res.status(400).json({ error: 'At least one image required' });
+            }
+            update.images = images;
+        }
+        if (displayYear != null) update.displayYear = Number(displayYear);
+        if (displayMonth != null) update.displayMonth = Number(displayMonth);
+        if (displayDay != null) update.displayDay = Number(displayDay);
+        await BlogPost.updateOne({ id }, { $set: update });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.delete('/api/admin/blog/:id', checkAdminPwd, async (req, res) => {
+    try {
+        await BlogPost.deleteOne({ id: req.params.id });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
 
 app.get('/api/public/testimonials', async (req, res) => {
     try {
