@@ -5,7 +5,13 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const app = express();
 
 // CORS Configuration
-const allowedOrigins = ['https://samwu429.github.io', 'http://localhost:3000', 'http://127.0.0.1:3000'];
+const allowedOrigins = [
+    'https://samwu429.github.io',
+    'https://topphi.com',
+    'https://www.topphi.com',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000'
+];
 app.use(cors({
     origin: function (origin, callback) {
         if (!origin || allowedOrigins.includes(origin)) {
@@ -113,6 +119,9 @@ const testimonialSchema = new mongoose.Schema({
     linkedin: String,
     relationship: String,
     comment: String,
+    sortOrder: { type: Number, default: 0 },
+    isPublic: { type: Boolean, default: true },
+    createdAt: String,
     timestamp: String
 });
 const Testimonial = mongoose.model('Testimonial', testimonialSchema);
@@ -338,11 +347,15 @@ app.delete('/api/admin/blog/:id', checkAdminPwd, async (req, res) => {
 
 app.get('/api/public/testimonials', async (req, res) => {
     try {
-        const testimonials = await Testimonial.find().sort({ _id: -1 });
+        const testimonials = await Testimonial.find({ isPublic: { $ne: false } }).sort({ sortOrder: 1, _id: -1 });
         const data = testimonials.map(t => ({
             id: t.id,
+            name: t.name,
             relationship: t.relationship,
             comment: t.comment,
+            sortOrder: t.sortOrder != null ? Number(t.sortOrder) : 0,
+            isPublic: t.isPublic !== false,
+            createdAt: t.createdAt || t.timestamp || null,
             timestamp: t.timestamp
         }));
         res.json(data);
@@ -362,7 +375,7 @@ app.get('/api/hidden/photos', checkVisitorPwd, async (req, res) => {
 
 app.get('/api/hidden/testimonials', checkVisitorPwd, async (req, res) => { 
     try {
-        const testimonials = await Testimonial.find().sort({ _id: -1 });
+        const testimonials = await Testimonial.find().sort({ sortOrder: 1, _id: -1 });
         res.json(testimonials); 
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -371,14 +384,41 @@ app.get('/api/hidden/testimonials', checkVisitorPwd, async (req, res) => {
 
 app.post('/api/hidden/testimonials', checkVisitorPwd, async (req, res) => {
     try {
-        const { name, linkedin, relationship, comment } = req.body;
+        const { id, name, linkedin, relationship, comment, sortOrder, isPublic, createdAt, timestamp } = req.body || {};
         if (!name || !relationship || !comment) return res.status(400).json({error: 'Missing fields'});
-        
+        const nowIso = new Date().toISOString();
+        const created = createdAt || timestamp || nowIso;
         await Testimonial.create({ 
-            id: Date.now().toString(), 
-            name, linkedin, relationship, comment, 
-            timestamp: new Date().toISOString() 
+            id: id || Date.now().toString(),
+            name: String(name),
+            linkedin: linkedin != null ? String(linkedin) : '',
+            relationship: String(relationship),
+            comment: String(comment),
+            sortOrder: sortOrder != null && sortOrder !== '' ? Number(sortOrder) : 0,
+            isPublic: isPublic !== false,
+            createdAt: String(created),
+            timestamp: String(created)
         });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.put('/api/admin/testimonials/:id', checkAdminPwd, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const body = req.body || {};
+        const update = {};
+        if (body.name != null) update.name = String(body.name);
+        if (body.linkedin != null) update.linkedin = String(body.linkedin);
+        if (body.relationship != null) update.relationship = String(body.relationship);
+        if (body.comment != null) update.comment = String(body.comment);
+        if (body.sortOrder !== undefined) update.sortOrder = body.sortOrder === '' || body.sortOrder == null ? 0 : Number(body.sortOrder);
+        if (body.isPublic !== undefined) update.isPublic = body.isPublic !== false;
+        if (body.createdAt != null) update.createdAt = String(body.createdAt);
+        if (body.timestamp != null) update.timestamp = String(body.timestamp);
+        await Testimonial.updateOne({ id }, { $set: update });
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
