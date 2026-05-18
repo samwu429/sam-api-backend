@@ -166,6 +166,9 @@ const stashItemSchema = new mongoose.Schema({
     body: String,
     link: String,
     images: [String],
+    mediaData: String,
+    mediaName: String,
+    mediaMime: String,
     displayYear: Number,
     displayMonth: Number,
     displayDay: Number,
@@ -369,6 +372,9 @@ function mapStashRow(row) {
         body: row.body || '',
         link: row.link || '',
         images: row.images || [],
+        mediaData: row.mediaData || '',
+        mediaName: row.mediaName || '',
+        mediaMime: row.mediaMime || '',
         displayYear: row.displayYear,
         displayMonth: row.displayMonth,
         displayDay: row.displayDay,
@@ -385,18 +391,19 @@ function validateStashBody(body) {
     const text = body.body != null ? String(body.body).trim() : '';
     const link = body.link != null ? String(body.link).trim() : '';
     const images = Array.isArray(body.images) ? body.images.filter(Boolean) : [];
+    const mediaData = body.mediaData != null ? String(body.mediaData).trim() : '';
 
     if (kind === 'photo' && !images.length) {
         return 'Photo items need at least one image';
     }
-    if (kind === 'video' && !link) {
-        return 'Video items need a YouTube or Vimeo link';
+    if (kind === 'video' && !link && !mediaData) {
+        return 'Video needs a YouTube/Vimeo link or an uploaded video file';
     }
-    if (kind === 'article' && !title && !text && !link) {
-        return 'Article needs a title, body, or link';
+    if (kind === 'article' && !title && !text && !link && !mediaData) {
+        return 'Article needs a title, body, link, or PDF';
     }
-    if (kind === 'note' && !text) {
-        return 'Note needs body text';
+    if (kind === 'note' && !text && !mediaData) {
+        return 'Note needs body text or a PDF';
     }
     const y = Number(body.displayYear);
     const m = Number(body.displayMonth);
@@ -439,7 +446,7 @@ app.post('/api/admin/stash', checkAdminPwd, async (req, res) => {
     try {
         const err = validateStashBody(req.body);
         if (err) return res.status(400).json({ error: err });
-        const { kind, title, body, link, images, displayYear, displayMonth, displayDay } = req.body;
+        const { kind, title, body, link, images, mediaData, mediaName, mediaMime, displayYear, displayMonth, displayDay } = req.body;
         await StashItem.create({
             id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
             kind: String(kind),
@@ -447,6 +454,9 @@ app.post('/api/admin/stash', checkAdminPwd, async (req, res) => {
             body: body != null ? String(body) : '',
             link: link != null ? String(link).trim() : '',
             images: Array.isArray(images) ? images.filter(Boolean) : [],
+            mediaData: mediaData != null ? String(mediaData) : '',
+            mediaName: mediaName != null ? String(mediaName) : '',
+            mediaMime: mediaMime != null ? String(mediaMime) : '',
             displayYear: Number(displayYear),
             displayMonth: Number(displayMonth),
             displayDay: Number(displayDay),
@@ -468,6 +478,9 @@ app.put('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
             body: req.body.body != null ? req.body.body : existing.body,
             link: req.body.link != null ? req.body.link : existing.link,
             images: req.body.images != null ? req.body.images : (existing.images || []),
+            mediaData: req.body.mediaData !== undefined ? req.body.mediaData : (existing.mediaData || ''),
+            mediaName: req.body.mediaName !== undefined ? req.body.mediaName : (existing.mediaName || ''),
+            mediaMime: req.body.mediaMime !== undefined ? req.body.mediaMime : (existing.mediaMime || ''),
             displayYear: req.body.displayYear != null ? req.body.displayYear : existing.displayYear,
             displayMonth: req.body.displayMonth != null ? req.body.displayMonth : existing.displayMonth,
             displayDay: req.body.displayDay != null ? req.body.displayDay : existing.displayDay
@@ -480,6 +493,9 @@ app.put('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
         if (req.body.body != null) update.body = String(req.body.body);
         if (req.body.link != null) update.link = String(req.body.link).trim();
         if (req.body.images != null) update.images = Array.isArray(req.body.images) ? req.body.images.filter(Boolean) : [];
+        if (req.body.mediaData !== undefined) update.mediaData = String(req.body.mediaData || '');
+        if (req.body.mediaName !== undefined) update.mediaName = String(req.body.mediaName || '');
+        if (req.body.mediaMime !== undefined) update.mediaMime = String(req.body.mediaMime || '');
         if (req.body.displayYear != null) update.displayYear = Number(req.body.displayYear);
         if (req.body.displayMonth != null) update.displayMonth = Number(req.body.displayMonth);
         if (req.body.displayDay != null) update.displayDay = Number(req.body.displayDay);
