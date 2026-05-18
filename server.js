@@ -103,7 +103,7 @@ const mongoose = require('mongoose');
 const multer = require('multer');
 const { GridFSBucket, ObjectId } = require('mongodb');
 
-const STASH_MEDIA_MAX_BYTES = 100 * 1024 * 1024;
+const STASH_MEDIA_MAX_BYTES = 110 * 1024 * 1024;
 const stashMediaUpload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: STASH_MEDIA_MAX_BYTES }
@@ -441,7 +441,7 @@ app.post('/api/admin/stash/media', checkAdminPwd, (req, res) => {
     stashMediaUpload.single('file')(req, res, async (err) => {
         if (err) {
             const msg = err.code === 'LIMIT_FILE_SIZE'
-                ? 'File is too large (max 100 MB)'
+                ? 'File is too large (max 110 MB)'
                 : (err.message || 'Upload failed');
             return res.status(400).json({ error: msg });
         }
