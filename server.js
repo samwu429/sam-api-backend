@@ -157,6 +157,22 @@ const blogPostSchema = new mongoose.Schema({
 });
 const BlogPost = mongoose.model('BlogPost', blogPostSchema);
 
+const STASH_KINDS = ['photo', 'video', 'article', 'note'];
+
+const stashItemSchema = new mongoose.Schema({
+    id: String,
+    kind: { type: String, enum: STASH_KINDS },
+    title: String,
+    body: String,
+    link: String,
+    images: [String],
+    displayYear: Number,
+    displayMonth: Number,
+    displayDay: Number,
+    timestamp: String
+});
+const StashItem = mongoose.model('StashItem', stashItemSchema);
+
 function blogSortDate(p) {
     const y = Number(p.displayYear) || 1970;
     const m = Math.min(12, Math.max(1, Number(p.displayMonth) || 1));
@@ -339,6 +355,144 @@ app.put('/api/admin/blog/:id', checkAdminPwd, async (req, res) => {
 app.delete('/api/admin/blog/:id', checkAdminPwd, async (req, res) => {
     try {
         await BlogPost.deleteOne({ id: req.params.id });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+function mapStashRow(row) {
+    return {
+        id: row.id,
+        kind: row.kind,
+        title: row.title || '',
+        body: row.body || '',
+        link: row.link || '',
+        images: row.images || [],
+        displayYear: row.displayYear,
+        displayMonth: row.displayMonth,
+        displayDay: row.displayDay,
+        timestamp: row.timestamp
+    };
+}
+
+function validateStashBody(body) {
+    const kind = body.kind != null ? String(body.kind) : '';
+    if (!STASH_KINDS.includes(kind)) {
+        return 'Kind must be photo, video, article, or note';
+    }
+    const title = body.title != null ? String(body.title).trim() : '';
+    const text = body.body != null ? String(body.body).trim() : '';
+    const link = body.link != null ? String(body.link).trim() : '';
+    const images = Array.isArray(body.images) ? body.images.filter(Boolean) : [];
+
+    if (kind === 'photo' && !images.length) {
+        return 'Photo items need at least one image';
+    }
+    if (kind === 'video' && !link) {
+        return 'Video items need a YouTube or Vimeo link';
+    }
+    if (kind === 'article' && !title && !text && !link) {
+        return 'Article needs a title, body, or link';
+    }
+    if (kind === 'note' && !text) {
+        return 'Note needs body text';
+    }
+    const y = Number(body.displayYear);
+    const m = Number(body.displayMonth);
+    const d = Number(body.displayDay);
+    if (!y || !m || !d) return 'Display date (Y/M/D) required';
+    return null;
+}
+
+app.get('/api/public/stash', async (req, res) => {
+    try {
+        const rows = await StashItem.find();
+        const sorted = rows.sort((a, b) => blogSortDate(b) - blogSortDate(a));
+        res.json(sorted.map(mapStashRow));
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/public/stash/:id', async (req, res) => {
+    try {
+        const row = await StashItem.findOne({ id: req.params.id });
+        if (!row) return res.status(404).json({ error: 'Not found' });
+        res.json(mapStashRow(row));
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/admin/stash', checkAdminPwd, async (req, res) => {
+    try {
+        const rows = await StashItem.find();
+        const sorted = rows.sort((a, b) => blogSortDate(b) - blogSortDate(a));
+        res.json(sorted);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/admin/stash', checkAdminPwd, async (req, res) => {
+    try {
+        const err = validateStashBody(req.body);
+        if (err) return res.status(400).json({ error: err });
+        const { kind, title, body, link, images, displayYear, displayMonth, displayDay } = req.body;
+        await StashItem.create({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+            kind: String(kind),
+            title: title != null ? String(title) : '',
+            body: body != null ? String(body) : '',
+            link: link != null ? String(link).trim() : '',
+            images: Array.isArray(images) ? images.filter(Boolean) : [],
+            displayYear: Number(displayYear),
+            displayMonth: Number(displayMonth),
+            displayDay: Number(displayDay),
+            timestamp: new Date().toISOString()
+        });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.put('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
+    try {
+        const existing = await StashItem.findOne({ id: req.params.id });
+        if (!existing) return res.status(404).json({ error: 'Not found' });
+        const merged = {
+            kind: req.body.kind != null ? req.body.kind : existing.kind,
+            title: req.body.title != null ? req.body.title : existing.title,
+            body: req.body.body != null ? req.body.body : existing.body,
+            link: req.body.link != null ? req.body.link : existing.link,
+            images: req.body.images != null ? req.body.images : (existing.images || []),
+            displayYear: req.body.displayYear != null ? req.body.displayYear : existing.displayYear,
+            displayMonth: req.body.displayMonth != null ? req.body.displayMonth : existing.displayMonth,
+            displayDay: req.body.displayDay != null ? req.body.displayDay : existing.displayDay
+        };
+        const err = validateStashBody(merged);
+        if (err) return res.status(400).json({ error: err });
+        const update = {};
+        if (req.body.kind != null) update.kind = String(req.body.kind);
+        if (req.body.title != null) update.title = String(req.body.title);
+        if (req.body.body != null) update.body = String(req.body.body);
+        if (req.body.link != null) update.link = String(req.body.link).trim();
+        if (req.body.images != null) update.images = Array.isArray(req.body.images) ? req.body.images.filter(Boolean) : [];
+        if (req.body.displayYear != null) update.displayYear = Number(req.body.displayYear);
+        if (req.body.displayMonth != null) update.displayMonth = Number(req.body.displayMonth);
+        if (req.body.displayDay != null) update.displayDay = Number(req.body.displayDay);
+        await StashItem.updateOne({ id: req.params.id }, { $set: update });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.delete('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
+    try {
+        await StashItem.deleteOne({ id: req.params.id });
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
