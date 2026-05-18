@@ -100,6 +100,27 @@ app.post('/chat', async (req, res) => {
 });
 
 const mongoose = require('mongoose');
+const multer = require('multer');
+const { GridFSBucket, ObjectId } = require('mongodb');
+
+const STASH_MEDIA_MAX_BYTES = 100 * 1024 * 1024;
+const stashMediaUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: STASH_MEDIA_MAX_BYTES }
+});
+
+function getStashMediaBucket() {
+    if (!mongoose.connection.db) throw new Error('Database not connected');
+    return new GridFSBucket(mongoose.connection.db, { bucketName: 'stashMedia' });
+}
+
+async function deleteStashMediaGridFile(gridId) {
+    if (!gridId) return;
+    try {
+        const bucket = getStashMediaBucket();
+        await bucket.delete(new ObjectId(String(gridId)));
+    } catch (_) {}
+}
 
 // ======================== MongoDB Configuration ========================
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -167,6 +188,7 @@ const stashItemSchema = new mongoose.Schema({
     link: String,
     images: [String],
     mediaData: String,
+    mediaGridId: String,
     mediaName: String,
     mediaMime: String,
     displayYear: Number,
@@ -373,6 +395,7 @@ function mapStashRow(row) {
         link: row.link || '',
         images: row.images || [],
         mediaData: row.mediaData || '',
+        mediaGridId: row.mediaGridId || '',
         mediaName: row.mediaName || '',
         mediaMime: row.mediaMime || '',
         displayYear: row.displayYear,
@@ -392,17 +415,19 @@ function validateStashBody(body) {
     const link = body.link != null ? String(body.link).trim() : '';
     const images = Array.isArray(body.images) ? body.images.filter(Boolean) : [];
     const mediaData = body.mediaData != null ? String(body.mediaData).trim() : '';
+    const mediaGridId = body.mediaGridId != null ? String(body.mediaGridId).trim() : '';
+    const hasMedia = !!(mediaData || mediaGridId);
 
     if (kind === 'photo' && !images.length) {
         return 'Photo items need at least one image';
     }
-    if (kind === 'video' && !link && !mediaData) {
+    if (kind === 'video' && !link && !hasMedia) {
         return 'Video needs a YouTube/Vimeo link or an uploaded video file';
     }
-    if (kind === 'article' && !title && !text && !link && !mediaData) {
+    if (kind === 'article' && !title && !text && !link && !hasMedia) {
         return 'Article needs a title, body, link, or PDF';
     }
-    if (kind === 'note' && !text && !mediaData) {
+    if (kind === 'note' && !text && !hasMedia) {
         return 'Note needs body text or a PDF';
     }
     const y = Number(body.displayYear);
@@ -411,6 +436,56 @@ function validateStashBody(body) {
     if (!y || !m || !d) return 'Display date (Y/M/D) required';
     return null;
 }
+
+app.post('/api/admin/stash/media', checkAdminPwd, (req, res) => {
+    stashMediaUpload.single('file')(req, res, async (err) => {
+        if (err) {
+            const msg = err.code === 'LIMIT_FILE_SIZE'
+                ? 'File is too large (max 100 MB)'
+                : (err.message || 'Upload failed');
+            return res.status(400).json({ error: msg });
+        }
+        if (!req.file || !req.file.buffer) {
+            return res.status(400).json({ error: 'No file uploaded' });
+        }
+        try {
+            const bucket = getStashMediaBucket();
+            const uploadStream = bucket.openUploadStream(req.file.originalname || 'upload', {
+                contentType: req.file.mimetype || 'application/octet-stream',
+                metadata: { mime: req.file.mimetype || '' }
+            });
+            uploadStream.end(req.file.buffer);
+            uploadStream.on('error', (e) => res.status(500).json({ error: e.message }));
+            uploadStream.on('finish', () => {
+                res.json({
+                    gridId: uploadStream.id.toString(),
+                    name: req.file.originalname || 'upload',
+                    mime: req.file.mimetype || ''
+                });
+            });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+});
+
+app.get('/api/public/stash/media/:id', async (req, res) => {
+    try {
+        const bucket = getStashMediaBucket();
+        const fileId = new ObjectId(String(req.params.id));
+        const files = await bucket.find({ _id: fileId }).toArray();
+        if (!files.length) return res.status(404).json({ error: 'Not found' });
+        const file = files[0];
+        const mime = (file.metadata && file.metadata.mime) || file.contentType || 'application/octet-stream';
+        res.setHeader('Content-Type', mime);
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        const filename = file.filename || 'file';
+        res.setHeader('Content-Disposition', `inline; filename="${filename.replace(/"/g, '')}"`);
+        bucket.openDownloadStream(fileId).pipe(res);
+    } catch (e) {
+        res.status(404).json({ error: 'Not found' });
+    }
+});
 
 app.get('/api/public/stash', async (req, res) => {
     try {
@@ -446,7 +521,7 @@ app.post('/api/admin/stash', checkAdminPwd, async (req, res) => {
     try {
         const err = validateStashBody(req.body);
         if (err) return res.status(400).json({ error: err });
-        const { kind, title, body, link, images, mediaData, mediaName, mediaMime, displayYear, displayMonth, displayDay } = req.body;
+        const { kind, title, body, link, images, mediaData, mediaGridId, mediaName, mediaMime, displayYear, displayMonth, displayDay } = req.body;
         await StashItem.create({
             id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
             kind: String(kind),
@@ -455,6 +530,7 @@ app.post('/api/admin/stash', checkAdminPwd, async (req, res) => {
             link: link != null ? String(link).trim() : '',
             images: Array.isArray(images) ? images.filter(Boolean) : [],
             mediaData: mediaData != null ? String(mediaData) : '',
+            mediaGridId: mediaGridId != null ? String(mediaGridId) : '',
             mediaName: mediaName != null ? String(mediaName) : '',
             mediaMime: mediaMime != null ? String(mediaMime) : '',
             displayYear: Number(displayYear),
@@ -479,6 +555,7 @@ app.put('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
             link: req.body.link != null ? req.body.link : existing.link,
             images: req.body.images != null ? req.body.images : (existing.images || []),
             mediaData: req.body.mediaData !== undefined ? req.body.mediaData : (existing.mediaData || ''),
+            mediaGridId: req.body.mediaGridId !== undefined ? req.body.mediaGridId : (existing.mediaGridId || ''),
             mediaName: req.body.mediaName !== undefined ? req.body.mediaName : (existing.mediaName || ''),
             mediaMime: req.body.mediaMime !== undefined ? req.body.mediaMime : (existing.mediaMime || ''),
             displayYear: req.body.displayYear != null ? req.body.displayYear : existing.displayYear,
@@ -494,11 +571,20 @@ app.put('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
         if (req.body.link != null) update.link = String(req.body.link).trim();
         if (req.body.images != null) update.images = Array.isArray(req.body.images) ? req.body.images.filter(Boolean) : [];
         if (req.body.mediaData !== undefined) update.mediaData = String(req.body.mediaData || '');
+        if (req.body.mediaGridId !== undefined) update.mediaGridId = String(req.body.mediaGridId || '');
         if (req.body.mediaName !== undefined) update.mediaName = String(req.body.mediaName || '');
         if (req.body.mediaMime !== undefined) update.mediaMime = String(req.body.mediaMime || '');
         if (req.body.displayYear != null) update.displayYear = Number(req.body.displayYear);
         if (req.body.displayMonth != null) update.displayMonth = Number(req.body.displayMonth);
         if (req.body.displayDay != null) update.displayDay = Number(req.body.displayDay);
+        const nextGridId = update.mediaGridId !== undefined ? update.mediaGridId : (existing.mediaGridId || '');
+        const prevGridId = existing.mediaGridId || '';
+        if (prevGridId && prevGridId !== nextGridId) {
+            await deleteStashMediaGridFile(prevGridId);
+        }
+        if (req.body.mediaData !== undefined && !String(req.body.mediaData || '').trim() && prevGridId && !nextGridId) {
+            await deleteStashMediaGridFile(prevGridId);
+        }
         await StashItem.updateOne({ id: req.params.id }, { $set: update });
         res.json({ success: true });
     } catch (e) {
@@ -508,6 +594,10 @@ app.put('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
 
 app.delete('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
     try {
+        const existing = await StashItem.findOne({ id: req.params.id });
+        if (existing && existing.mediaGridId) {
+            await deleteStashMediaGridFile(existing.mediaGridId);
+        }
         await StashItem.deleteOne({ id: req.params.id });
         res.json({ success: true });
     } catch (e) {
