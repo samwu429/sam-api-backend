@@ -272,7 +272,7 @@ app.get('/api/admin/ping', checkAdminPwd, (req, res) => {
 
 app.get('/api/public/publications', async (req, res) => {
     try {
-        const rows = await Publication.find().sort({ sortOrder: -1, year: -1, _id: -1 });
+        const rows = await Publication.find().sort({ sortOrder: -1, year: -1, _id: -1 }).lean();
         res.json(rows.map(p => ({
             id: p.id,
             title: p.title,
@@ -289,7 +289,7 @@ app.get('/api/public/publications', async (req, res) => {
 
 app.get('/api/public/blog', async (req, res) => {
     try {
-        const rows = await BlogPost.find();
+        const rows = await BlogPost.find().lean();
         const sorted = rows.sort((a, b) => blogSortDate(b) - blogSortDate(a));
         res.json(sorted.map(p => ({
             id: p.id,
@@ -307,7 +307,7 @@ app.get('/api/public/blog', async (req, res) => {
 
 app.get('/api/admin/publications', checkAdminPwd, async (req, res) => {
     try {
-        const rows = await Publication.find().sort({ sortOrder: -1, year: -1, _id: -1 });
+        const rows = await Publication.find().sort({ sortOrder: -1, year: -1, _id: -1 }).lean();
         res.json(rows);
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -366,7 +366,7 @@ app.delete('/api/admin/publications/:id', checkAdminPwd, async (req, res) => {
 
 app.get('/api/admin/blog', checkAdminPwd, async (req, res) => {
     try {
-        const rows = await BlogPost.find();
+        const rows = await BlogPost.find().lean();
         const sorted = rows.sort((a, b) => blogSortDate(b) - blogSortDate(a));
         res.json(sorted);
     } catch (e) {
@@ -536,7 +536,7 @@ app.get('/api/public/stash/media/:id', async (req, res) => {
 
 app.get('/api/public/stash', async (req, res) => {
     try {
-        const rows = await StashItem.find();
+        const rows = await StashItem.find().lean();
         const sorted = rows.sort((a, b) => blogSortDate(b) - blogSortDate(a));
         res.json(sorted.map(mapStashRow));
     } catch (e) {
@@ -546,7 +546,7 @@ app.get('/api/public/stash', async (req, res) => {
 
 app.get('/api/public/stash/:id', async (req, res) => {
     try {
-        const row = await StashItem.findOne({ id: req.params.id });
+        const row = await StashItem.findOne({ id: req.params.id }).lean();
         if (!row) return res.status(404).json({ error: 'Not found' });
         res.json(mapStashRow(row));
     } catch (e) {
@@ -556,7 +556,7 @@ app.get('/api/public/stash/:id', async (req, res) => {
 
 app.get('/api/admin/stash', checkAdminPwd, async (req, res) => {
     try {
-        const rows = await StashItem.find();
+        const rows = await StashItem.find().lean();
         const sorted = rows.sort((a, b) => blogSortDate(b) - blogSortDate(a));
         res.json(sorted);
     } catch (e) {
@@ -593,7 +593,7 @@ app.post('/api/admin/stash', checkAdminPwd, async (req, res) => {
 
 app.put('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
     try {
-        const existing = await StashItem.findOne({ id: req.params.id });
+        const existing = await StashItem.findOne({ id: req.params.id }).lean();
         if (!existing) return res.status(404).json({ error: 'Not found' });
         const merged = {
             kind: req.body.kind != null ? req.body.kind : existing.kind,
@@ -641,7 +641,7 @@ app.put('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
 
 app.delete('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
     try {
-        const existing = await StashItem.findOne({ id: req.params.id });
+        const existing = await StashItem.findOne({ id: req.params.id }).lean();
         if (existing && existing.mediaGridId) {
             await deleteStashMediaGridFile(existing.mediaGridId);
         }
@@ -654,7 +654,7 @@ app.delete('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
 
 app.get('/api/public/testimonials', async (req, res) => {
     try {
-        const testimonials = await Testimonial.find({ isPublic: { $ne: false } }).sort({ sortOrder: 1, _id: -1 });
+        const testimonials = await Testimonial.find({ isPublic: { $ne: false } }).sort({ sortOrder: 1, _id: -1 }).lean();
         const data = testimonials.map(t => ({
             id: t.id,
             name: t.name,
@@ -673,7 +673,7 @@ app.get('/api/public/testimonials', async (req, res) => {
 
 app.get('/api/hidden/photos', checkVisitorPwd, async (req, res) => { 
     try {
-        const photos = await Photo.find().sort({ _id: -1 });
+        const photos = await Photo.find().sort({ _id: -1 }).lean();
         res.json(photos); 
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -682,7 +682,7 @@ app.get('/api/hidden/photos', checkVisitorPwd, async (req, res) => {
 
 app.get('/api/hidden/testimonials', checkVisitorPwd, async (req, res) => { 
     try {
-        const testimonials = await Testimonial.find().sort({ sortOrder: 1, _id: -1 });
+        const testimonials = await Testimonial.find().sort({ sortOrder: 1, _id: -1 }).lean();
         res.json(testimonials); 
     } catch (e) {
         res.status(500).json({ error: e.message });
