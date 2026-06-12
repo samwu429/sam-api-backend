@@ -1,8 +1,15 @@
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
+const crypto = require('crypto');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
+
+// Render runs behind one reverse proxy; needed so rate limiting sees real client IPs.
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
 
 // CORS Configuration
 const allowedOrigins = [
@@ -14,15 +21,39 @@ const allowedOrigins = [
 ];
 app.use(cors({
     origin: function (origin, callback) {
-        if (!origin || allowedOrigins.includes(origin)) {
-            callback(null, true);
-        } else {
-            callback(new Error('Not allowed by CORS'));
-        }
+        // Disallowed origins simply get no CORS headers instead of a 500 error.
+        callback(null, !origin || allowedOrigins.includes(origin));
     }
 }));
 
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+});
+
+app.use(compression());
 app.use(express.json({ limit: '25mb' }));
+
+// Throttle repeated failed password attempts (admin/visitor brute-force protection).
+const authLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    limit: 30,
+    skipSuccessfulRequests: true,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many attempts. Try again later.' }
+});
+app.use('/api/admin', authLimiter);
+app.use('/api/hidden', authLimiter);
+
+const chatLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000,
+    limit: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { reply: 'Too many requests. Please slow down and try again in a few minutes.' }
+});
 
 // Keepalive endpoint
 app.get('/ping', (req, res) => res.send('pong'));
@@ -67,13 +98,21 @@ STRICT RESPONSE RULES:
 - Reject any questions that are not related to Sam's professional or academic background.
 `;
 
-app.post('/chat', async (req, res) => {
+app.post('/chat', chatLimiter, async (req, res) => {
     try {
-        const userMsg = req.body.message;
-        const history = req.body.history || [];
-        
+        const userMsg = typeof req.body.message === 'string' ? req.body.message.slice(0, 4000) : '';
+        if (!userMsg.trim()) {
+            return res.status(400).json({ reply: 'Please enter a message.' });
+        }
+        const history = (Array.isArray(req.body.history) ? req.body.history : [])
+            .slice(-20)
+            .map(h => ({
+                role: h && h.role === 'AI' ? 'AI' : 'User',
+                text: h && typeof h.text === 'string' ? h.text.slice(0, 4000) : ''
+            }));
+
         const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-        
+
         let conversation = history.map(h => `${h.role === 'AI' ? 'Sam Agent' : 'User'}: ${h.text}`).join('\n');
         
         const fullPrompt = `
@@ -95,7 +134,7 @@ app.post('/chat', async (req, res) => {
         res.json({ reply: text });
     } catch (error) {
         console.error("DEBUG:", error.message);
-        res.json({ reply: `Service temporarily unavailable. Please try again later. (${error.message})` });
+        res.json({ reply: 'Service temporarily unavailable. Please try again later.' });
     }
 });
 
@@ -205,17 +244,25 @@ function blogSortDate(p) {
     return new Date(y, m - 1, d).getTime();
 }
 
+// Constant-time comparison to avoid leaking password contents through timing.
+function passwordMatches(provided, expected) {
+    if (typeof provided !== 'string' || typeof expected !== 'string' || !expected) return false;
+    const a = crypto.createHash('sha256').update(provided).digest();
+    const b = crypto.createHash('sha256').update(expected).digest();
+    return crypto.timingSafeEqual(a, b);
+}
+
 const checkVisitorPwd = (req, res, next) => {
     const pwd = req.headers['x-password'];
     const visitorEnv = process.env.VISITOR_PASSWORD || '6429';
     const adminEnv = process.env.ADMIN_PASSWORD || '0429';
-    if (pwd === visitorEnv || pwd === adminEnv) next();
+    if (passwordMatches(pwd, visitorEnv) || passwordMatches(pwd, adminEnv)) next();
     else res.status(401).json({ error: 'Unauthorized' });
 };
 const checkAdminPwd = (req, res, next) => {
     const pwd = req.headers['x-password'];
     const adminEnv = process.env.ADMIN_PASSWORD || '0429';
-    if (pwd === adminEnv) next();
+    if (passwordMatches(pwd, adminEnv)) next();
     else res.status(401).json({ error: 'Unauthorized Admin' });
 };
 
@@ -479,8 +526,8 @@ app.get('/api/public/stash/media/:id', async (req, res) => {
         const mime = (file.metadata && file.metadata.mime) || file.contentType || 'application/octet-stream';
         res.setHeader('Content-Type', mime);
         res.setHeader('Cache-Control', 'public, max-age=86400');
-        const filename = file.filename || 'file';
-        res.setHeader('Content-Disposition', `inline; filename="${filename.replace(/"/g, '')}"`);
+        const filename = String(file.filename || 'file').replace(/["\r\n]/g, '');
+        res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
         bucket.openDownloadStream(fileId).pipe(res);
     } catch (e) {
         res.status(404).json({ error: 'Not found' });
