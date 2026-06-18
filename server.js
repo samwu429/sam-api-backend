@@ -7,11 +7,13 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 
-// Render runs behind one reverse proxy; needed so rate limiting sees real client IPs.
+// Render runs behind one reverse proxy; this lets rate limiting see real client IPs.
+// Render 部署位于单层反向代理之后；此设置使限流能识别真实客户端 IP。
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
-// CORS Configuration
+// Allowlist of browser origins permitted to call the API under CORS.
+// 允许通过 CORS 调用此 API 的浏览器来源白名单。
 const allowedOrigins = [
     'https://samwu429.github.io',
     'https://topphi.com',
@@ -35,7 +37,10 @@ app.use((req, res, next) => {
 app.use(compression());
 app.use(express.json({ limit: '25mb' }));
 
-// Throttle repeated failed password attempts (admin/visitor brute-force protection).
+// Throttle repeated failed password attempts to blunt admin/visitor brute force.
+// Successful requests are skipped so normal authenticated traffic is unaffected.
+// 限制重复的失败密码尝试，以削弱对管理员/访客的暴力破解。成功请求不计入，
+// 因而正常的已鉴权流量不受影响。
 const authLimiter = rateLimit({
     windowMs: 10 * 60 * 1000,
     limit: 30,
@@ -245,6 +250,7 @@ function blogSortDate(p) {
 }
 
 // Constant-time comparison to avoid leaking password contents through timing.
+// 使用常量时间比较，避免通过时序泄露密码内容。
 function passwordMatches(provided, expected) {
     if (typeof provided !== 'string' || typeof expected !== 'string' || !expected) return false;
     const a = crypto.createHash('sha256').update(provided).digest();
@@ -252,19 +258,137 @@ function passwordMatches(provided, expected) {
     return crypto.timingSafeEqual(a, b);
 }
 
+// Configured credentials with weak development fallbacks. Production deployments
+// must set ADMIN_PASSWORD and VISITOR_PASSWORD; the fallbacks only keep the app
+// usable before those environment variables are configured.
+// 配置的凭证，附带较弱的开发回退值。生产部署须设置 ADMIN_PASSWORD 与
+// VISITOR_PASSWORD；回退值仅用于在尚未配置前保持应用可用。
+function adminPassword() {
+    return process.env.ADMIN_PASSWORD || '0429';
+}
+function visitorPassword() {
+    return process.env.VISITOR_PASSWORD || '6429';
+}
+
+// Secret used to sign session tokens. A configured SESSION_SECRET is strongly
+// preferred; when absent, a per-process random secret keeps the app working,
+// with the tradeoff that a restart invalidates outstanding tokens and forces
+// users to log in again.
+// 用于签发会话令牌的密钥。强烈建议配置 SESSION_SECRET；缺省时使用进程级
+// 随机密钥以保持应用可用，代价是服务重启会使未过期令牌失效并要求重新登录。
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(48).toString('hex');
+
+// Session lifetime in seconds, shared by admin and visitor tokens.
+// 管理员与访客令牌共用的会话有效期（秒）。
+const SESSION_TTL_SECONDS = 12 * 60 * 60;
+
+function base64UrlEncode(input) {
+    return Buffer.from(input).toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+}
+
+function base64UrlToBuffer(value) {
+    const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+    const padding = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4));
+    return Buffer.from(normalized + padding, 'base64');
+}
+
+// Issue a compact "<payload>.<signature>" session token for the given role. The
+// payload is readable base64url JSON; integrity is enforced by the HMAC
+// signature and the embedded expiry bounds the token's validity.
+// 为指定角色签发紧凑的 "<负载>.<签名>" 会话令牌。负载为可读的 base64url
+// JSON，完整性由 HMAC 签名保证，内嵌的过期时间限定其有效期。
+function issueSessionToken(role) {
+    const payload = {
+        role,
+        exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS
+    };
+    const body = base64UrlEncode(JSON.stringify(payload));
+    const signature = base64UrlEncode(crypto.createHmac('sha256', SESSION_SECRET).update(body).digest());
+    return `${body}.${signature}`;
+}
+
+// Validate a session token's signature and expiry, returning its role when valid
+// or null otherwise. Signature comparison is constant-time.
+// 校验会话令牌的签名与过期时间，有效时返回其角色，否则返回 null。签名比较为常量时间。
+function sessionTokenRole(token) {
+    if (typeof token !== 'string') return null;
+    const dot = token.indexOf('.');
+    if (dot <= 0) return null;
+    const body = token.slice(0, dot);
+    const signature = token.slice(dot + 1);
+    if (!body || !signature) return null;
+    const expected = base64UrlEncode(crypto.createHmac('sha256', SESSION_SECRET).update(body).digest());
+    const providedBuf = Buffer.from(signature);
+    const expectedBuf = Buffer.from(expected);
+    if (providedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(providedBuf, expectedBuf)) {
+        return null;
+    }
+    let payload;
+    try {
+        payload = JSON.parse(base64UrlToBuffer(body).toString('utf8'));
+    } catch (_) {
+        return null;
+    }
+    if (!payload || typeof payload.exp !== 'number' || payload.exp < Math.floor(Date.now() / 1000)) {
+        return null;
+    }
+    return payload.role === 'admin' || payload.role === 'visitor' ? payload.role : null;
+}
+
+// Extract a bearer token from the Authorization header, if present.
+// 若存在，则从 Authorization 头中提取 Bearer 令牌。
+function bearerToken(req) {
+    const header = req.headers['authorization'] || '';
+    const match = /^Bearer\s+(.+)$/i.exec(header);
+    return match ? match[1].trim() : '';
+}
+
+// Authorization gate for the private gallery. Accepts a valid admin or visitor
+// session token, and retains the legacy x-password header during migration.
+// 私密图库的鉴权关卡。接受有效的管理员或访客会话令牌，并在迁移期间保留旧版 x-password 头。
 const checkVisitorPwd = (req, res, next) => {
+    const role = sessionTokenRole(bearerToken(req));
+    if (role === 'admin' || role === 'visitor') return next();
     const pwd = req.headers['x-password'];
-    const visitorEnv = process.env.VISITOR_PASSWORD || '6429';
-    const adminEnv = process.env.ADMIN_PASSWORD || '0429';
-    if (passwordMatches(pwd, visitorEnv) || passwordMatches(pwd, adminEnv)) next();
-    else res.status(401).json({ error: 'Unauthorized' });
+    if (passwordMatches(pwd, visitorPassword()) || passwordMatches(pwd, adminPassword())) return next();
+    res.status(401).json({ error: 'Unauthorized' });
 };
+
+// Authorization gate for admin-only routes. Accepts a valid admin session token,
+// and retains the legacy x-password header during migration.
+// 仅管理员路由的鉴权关卡。接受有效的管理员会话令牌，并在迁移期间保留旧版 x-password 头。
 const checkAdminPwd = (req, res, next) => {
+    const role = sessionTokenRole(bearerToken(req));
+    if (role === 'admin') return next();
     const pwd = req.headers['x-password'];
-    const adminEnv = process.env.ADMIN_PASSWORD || '0429';
-    if (passwordMatches(pwd, adminEnv)) next();
-    else res.status(401).json({ error: 'Unauthorized Admin' });
+    if (passwordMatches(pwd, adminPassword())) return next();
+    res.status(401).json({ error: 'Unauthorized Admin' });
 };
+
+// Exchange a valid admin password for a short-lived admin session token. The
+// auth rate limiter mounted on /api/admin also guards this route.
+// 用有效的管理员密码换取短期管理员会话令牌。挂载在 /api/admin 上的限流器同样保护此路由。
+app.post('/api/admin/login', (req, res) => {
+    const pwd = req.body ? req.body.password : '';
+    if (!passwordMatches(pwd, adminPassword())) {
+        return res.status(401).json({ error: 'Unauthorized Admin' });
+    }
+    res.json({ token: issueSessionToken('admin'), role: 'admin', expiresIn: SESSION_TTL_SECONDS });
+});
+
+// Exchange a valid visitor (or admin) password for a visitor-scope session token
+// used by the private gallery. Mounted under /api/hidden so the limiter applies.
+// 用有效的访客（或管理员）密码换取访客作用域会话令牌，供私密图库使用。挂载在 /api/hidden 下，因而受限流器保护。
+app.post('/api/hidden/login', (req, res) => {
+    const pwd = req.body ? req.body.password : '';
+    if (!passwordMatches(pwd, visitorPassword()) && !passwordMatches(pwd, adminPassword())) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    res.json({ token: issueSessionToken('visitor'), role: 'visitor', expiresIn: SESSION_TTL_SECONDS });
+});
 
 app.get('/api/admin/ping', checkAdminPwd, (req, res) => {
     res.json({ ok: true });
