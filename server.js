@@ -21,11 +21,19 @@ const allowedOrigins = [
     'http://localhost:3000',
     'http://127.0.0.1:3000'
 ];
+// credentials:true makes the browser send/receive the cross-site session cookie
+// and emits Access-Control-Allow-Credentials. Because the origin option is a
+// function, the allowed origin is reflected back specifically (never "*"), which
+// is mandatory once credentials are allowed.
+// credentials:true 使浏览器在跨站请求中携带并接收会话 Cookie，并返回
+// Access-Control-Allow-Credentials。由于 origin 为函数，允许的来源会被精确
+// 回显（绝不会是 "*"），这是开启凭证后所必需的。
 app.use(cors({
     origin: function (origin, callback) {
         // Disallowed origins simply get no CORS headers instead of a 500 error.
         callback(null, !origin || allowedOrigins.includes(origin));
-    }
+    },
+    credentials: true
 }));
 
 app.use((req, res, next) => {
@@ -282,6 +290,20 @@ const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(48).toSt
 // 管理员与访客令牌共用的会话有效期（秒）。
 const SESSION_TTL_SECONDS = 12 * 60 * 60;
 
+// Distinct httpOnly cookie names per role.
+// 按角色区分的 httpOnly Cookie 名称。
+const ADMIN_COOKIE_NAME = 'admin_session';
+const VISITOR_COOKIE_NAME = 'visitor_session';
+
+// Shared session cookie attributes. SameSite=None with Secure is mandatory:
+// the site (samwu429.github.io) and the API (*.onrender.com) are different
+// origins, so the session cookie is third-party/cross-site and browsers drop it
+// unless both flags are set. httpOnly keeps it out of reach of page JavaScript.
+// 共享的会话 Cookie 属性。必须设置 SameSite=None 且 Secure：站点
+//（samwu429.github.io）与 API（*.onrender.com）属于不同源，会话 Cookie 为
+// 第三方/跨站，缺少这两项浏览器会丢弃；httpOnly 使其不被页面脚本读取。
+const SESSION_COOKIE_BASE = { httpOnly: true, secure: true, sameSite: 'none', path: '/' };
+
 function base64UrlEncode(input) {
     return Buffer.from(input).toString('base64')
         .replace(/\+/g, '-')
@@ -346,22 +368,52 @@ function bearerToken(req) {
     return match ? match[1].trim() : '';
 }
 
-// Authorization gate for the private gallery. Accepts a valid admin or visitor
-// session token, and retains the legacy x-password header during migration.
-// 私密图库的鉴权关卡。接受有效的管理员或访客会话令牌，并在迁移期间保留旧版 x-password 头。
+// Read a single cookie value from the raw Cookie header. Parsing it by hand
+// avoids adding cookie-parser; this repo tracks node_modules with no .gitignore,
+// so new dependencies are intentionally avoided.
+// 从原始 Cookie 头中读取单个 Cookie 值。手工解析以避免引入 cookie-parser；
+// 本仓库跟踪 node_modules 且无 .gitignore，故有意不新增依赖。
+function readCookie(req, name) {
+    const header = req.headers['cookie'];
+    if (typeof header !== 'string' || !header) return '';
+    for (const part of header.split(';')) {
+        const trimmed = part.trim();
+        const eq = trimmed.indexOf('=');
+        if (eq <= 0) continue;
+        if (trimmed.slice(0, eq) === name) {
+            return decodeURIComponent(trimmed.slice(eq + 1));
+        }
+    }
+    return '';
+}
+
+// Authorization gate for the private gallery. Reads the session token in
+// priority order: httpOnly cookie first (primary), then Authorization: Bearer
+// (fallback when third-party cookies are blocked), then the legacy x-password
+// header. Accepts a valid admin or visitor role.
+// 私密图库的鉴权关卡。按优先级读取会话令牌：先 httpOnly Cookie（主用），
+// 再 Authorization: Bearer（第三方 Cookie 被拦截时的兜底），最后旧版
+// x-password 头。接受有效的管理员或访客角色。
 const checkVisitorPwd = (req, res, next) => {
-    const role = sessionTokenRole(bearerToken(req));
+    let role = sessionTokenRole(readCookie(req, ADMIN_COOKIE_NAME))
+        || sessionTokenRole(readCookie(req, VISITOR_COOKIE_NAME));
+    if (role !== 'admin' && role !== 'visitor') role = sessionTokenRole(bearerToken(req));
     if (role === 'admin' || role === 'visitor') return next();
     const pwd = req.headers['x-password'];
     if (passwordMatches(pwd, visitorPassword()) || passwordMatches(pwd, adminPassword())) return next();
     res.status(401).json({ error: 'Unauthorized' });
 };
 
-// Authorization gate for admin-only routes. Accepts a valid admin session token,
-// and retains the legacy x-password header during migration.
-// 仅管理员路由的鉴权关卡。接受有效的管理员会话令牌，并在迁移期间保留旧版 x-password 头。
+// Authorization gate for admin-only routes. Reads the session token in priority
+// order: httpOnly cookie first (primary), then Authorization: Bearer (fallback
+// when third-party cookies are blocked), then the legacy x-password header.
+// Requires the admin role.
+// 仅管理员路由的鉴权关卡。按优先级读取会话令牌：先 httpOnly Cookie（主用），
+// 再 Authorization: Bearer（第三方 Cookie 被拦截时的兜底），最后旧版
+// x-password 头。要求管理员角色。
 const checkAdminPwd = (req, res, next) => {
-    const role = sessionTokenRole(bearerToken(req));
+    let role = sessionTokenRole(readCookie(req, ADMIN_COOKIE_NAME));
+    if (role !== 'admin') role = sessionTokenRole(bearerToken(req));
     if (role === 'admin') return next();
     const pwd = req.headers['x-password'];
     if (passwordMatches(pwd, adminPassword())) return next();
@@ -376,7 +428,22 @@ app.post('/api/admin/login', (req, res) => {
     if (!passwordMatches(pwd, adminPassword())) {
         return res.status(401).json({ error: 'Unauthorized Admin' });
     }
-    res.json({ token: issueSessionToken('admin'), role: 'admin', expiresIn: SESSION_TTL_SECONDS });
+    const token = issueSessionToken('admin');
+    // Primary mechanism: an httpOnly cookie the page JavaScript cannot read. The
+    // token is also returned in the body as a Bearer fallback for clients whose
+    // browser blocks third-party cookies.
+    // 主用机制：页面脚本无法读取的 httpOnly Cookie。同时在响应体返回令牌作为
+    // Bearer 兜底，供浏览器拦截第三方 Cookie 的客户端使用。
+    res.cookie(ADMIN_COOKIE_NAME, token, { ...SESSION_COOKIE_BASE, maxAge: SESSION_TTL_SECONDS * 1000 });
+    res.json({ token, role: 'admin', expiresIn: SESSION_TTL_SECONDS });
+});
+
+// Clear the admin session cookie. A server route is required because httpOnly
+// cookies cannot be removed by page JavaScript.
+// 清除管理员会话 Cookie。因 httpOnly Cookie 无法被页面脚本删除，故需服务端路由。
+app.post('/api/admin/logout', (req, res) => {
+    res.clearCookie(ADMIN_COOKIE_NAME, SESSION_COOKIE_BASE);
+    res.json({ ok: true });
 });
 
 // Exchange a valid visitor (or admin) password for a visitor-scope session token
@@ -387,7 +454,20 @@ app.post('/api/hidden/login', (req, res) => {
     if (!passwordMatches(pwd, visitorPassword()) && !passwordMatches(pwd, adminPassword())) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
-    res.json({ token: issueSessionToken('visitor'), role: 'visitor', expiresIn: SESSION_TTL_SECONDS });
+    const token = issueSessionToken('visitor');
+    // Primary mechanism: an httpOnly cookie. The token is also returned in the
+    // body as a Bearer fallback when third-party cookies are blocked.
+    // 主用机制：httpOnly Cookie。同时在响应体返回令牌作为 Bearer 兜底，
+    // 供第三方 Cookie 被拦截时使用。
+    res.cookie(VISITOR_COOKIE_NAME, token, { ...SESSION_COOKIE_BASE, maxAge: SESSION_TTL_SECONDS * 1000 });
+    res.json({ token, role: 'visitor', expiresIn: SESSION_TTL_SECONDS });
+});
+
+// Clear the visitor session cookie (httpOnly cookies require a server route).
+// 清除访客会话 Cookie（httpOnly Cookie 需服务端路由清除）。
+app.post('/api/hidden/logout', (req, res) => {
+    res.clearCookie(VISITOR_COOKIE_NAME, SESSION_COOKIE_BASE);
+    res.json({ ok: true });
 });
 
 app.get('/api/admin/ping', checkAdminPwd, (req, res) => {
