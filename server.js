@@ -235,6 +235,7 @@ const STASH_KINDS = ['photo', 'video', 'article', 'note'];
 const stashItemSchema = new mongoose.Schema({
     id: String,
     kind: { type: String, enum: STASH_KINDS },
+    folderId: String,
     title: String,
     body: String,
     link: String,
@@ -249,6 +250,17 @@ const stashItemSchema = new mongoose.Schema({
     timestamp: String
 });
 const StashItem = mongoose.model('StashItem', stashItemSchema);
+
+const stashFolderSchema = new mongoose.Schema({
+    id: String,
+    name: String,
+    body: String,
+    parentId: String,
+    coverImage: String,
+    sortOrder: Number,
+    timestamp: String
+});
+const StashFolder = mongoose.model('StashFolder', stashFolderSchema);
 
 function blogSortDate(p) {
     const y = Number(p.displayYear) || 1970;
@@ -641,6 +653,7 @@ function mapStashRow(row) {
     return {
         id: row.id,
         kind: row.kind,
+        folderId: row.folderId || '',
         title: row.title || '',
         body: row.body || '',
         link: row.link || '',
@@ -654,6 +667,55 @@ function mapStashRow(row) {
         displayDay: row.displayDay,
         timestamp: row.timestamp
     };
+}
+
+function mapStashFolderRow(row) {
+    return {
+        id: row.id,
+        name: row.name || '',
+        body: row.body || '',
+        parentId: row.parentId || '',
+        coverImage: row.coverImage || '',
+        sortOrder: row.sortOrder != null ? Number(row.sortOrder) : 0,
+        timestamp: row.timestamp
+    };
+}
+
+function sortStashFolders(rows) {
+    return (Array.isArray(rows) ? rows : []).slice().sort((a, b) => {
+        const ao = Number(a && a.sortOrder != null ? a.sortOrder : 0);
+        const bo = Number(b && b.sortOrder != null ? b.sortOrder : 0);
+        if (ao !== bo) return ao - bo;
+        const an = String(a && a.name ? a.name : '').toLowerCase();
+        const bn = String(b && b.name ? b.name : '').toLowerCase();
+        if (an !== bn) return an.localeCompare(bn);
+        const at = new Date(a && a.timestamp ? a.timestamp : 0).getTime();
+        const bt = new Date(b && b.timestamp ? b.timestamp : 0).getTime();
+        return bt - at;
+    });
+}
+
+function validateStashFolderBody(body, folderId) {
+    const name = body.name != null ? String(body.name).trim() : '';
+    if (!name) return 'Folder name is required';
+    const parentId = body.parentId != null ? String(body.parentId).trim() : '';
+    if (folderId && parentId === folderId) return 'A folder cannot be its own parent';
+    return null;
+}
+
+async function stashFolderDescendantIds(rootId) {
+    const all = await StashFolder.find().lean();
+    const ids = new Set();
+    const queue = [rootId];
+    while (queue.length) {
+        const current = queue.shift();
+        if (!current || ids.has(current)) continue;
+        ids.add(current);
+        all.filter((f) => String(f.parentId || '') === String(current)).forEach((f) => {
+            if (f.id) queue.push(f.id);
+        });
+    }
+    return ids;
 }
 
 function validateStashBody(body) {
@@ -738,6 +800,25 @@ app.get('/api/public/stash/media/:id', async (req, res) => {
     }
 });
 
+app.get('/api/public/stash/folders', async (req, res) => {
+    try {
+        const rows = await StashFolder.find().lean();
+        res.json(sortStashFolders(rows).map(mapStashFolderRow));
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/public/stash/folders/:id', async (req, res) => {
+    try {
+        const row = await StashFolder.findOne({ id: req.params.id }).lean();
+        if (!row) return res.status(404).json({ error: 'Not found' });
+        res.json(mapStashFolderRow(row));
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.get('/api/public/stash', async (req, res) => {
     try {
         const rows = await StashItem.find().lean();
@@ -758,6 +839,91 @@ app.get('/api/public/stash/:id', async (req, res) => {
     }
 });
 
+app.get('/api/admin/stash/folders', checkAdminPwd, async (req, res) => {
+    try {
+        const rows = await StashFolder.find().lean();
+        res.json(sortStashFolders(rows).map(mapStashFolderRow));
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/admin/stash/folders', checkAdminPwd, async (req, res) => {
+    try {
+        const err = validateStashFolderBody(req.body);
+        if (err) return res.status(400).json({ error: err });
+        const parentId = req.body.parentId != null ? String(req.body.parentId).trim() : '';
+        if (parentId) {
+            const parent = await StashFolder.findOne({ id: parentId }).lean();
+            if (!parent) return res.status(400).json({ error: 'Parent folder not found' });
+        }
+        await StashFolder.create({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+            name: String(req.body.name).trim(),
+            body: req.body.body != null ? String(req.body.body) : '',
+            parentId,
+            coverImage: req.body.coverImage != null ? String(req.body.coverImage) : '',
+            sortOrder: req.body.sortOrder != null && req.body.sortOrder !== '' ? Number(req.body.sortOrder) : 0,
+            timestamp: new Date().toISOString()
+        });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.put('/api/admin/stash/folders/:id', checkAdminPwd, async (req, res) => {
+    try {
+        const folderId = req.params.id;
+        const existing = await StashFolder.findOne({ id: folderId }).lean();
+        if (!existing) return res.status(404).json({ error: 'Not found' });
+        const merged = {
+            name: req.body.name != null ? req.body.name : existing.name,
+            parentId: req.body.parentId != null ? req.body.parentId : (existing.parentId || ''),
+            body: req.body.body != null ? req.body.body : existing.body,
+            coverImage: req.body.coverImage !== undefined ? req.body.coverImage : (existing.coverImage || ''),
+            sortOrder: req.body.sortOrder != null ? req.body.sortOrder : existing.sortOrder
+        };
+        const err = validateStashFolderBody(merged, folderId);
+        if (err) return res.status(400).json({ error: err });
+        const parentId = merged.parentId != null ? String(merged.parentId).trim() : '';
+        if (parentId) {
+            if (parentId === folderId) return res.status(400).json({ error: 'A folder cannot be its own parent' });
+            const parent = await StashFolder.findOne({ id: parentId }).lean();
+            if (!parent) return res.status(400).json({ error: 'Parent folder not found' });
+            const descendants = await stashFolderDescendantIds(folderId);
+            if (descendants.has(parentId)) {
+                return res.status(400).json({ error: 'Cannot move a folder inside its own descendant' });
+            }
+        }
+        const update = {};
+        if (req.body.name != null) update.name = String(req.body.name).trim();
+        if (req.body.body != null) update.body = String(req.body.body);
+        if (req.body.parentId != null) update.parentId = parentId;
+        if (req.body.coverImage !== undefined) update.coverImage = String(req.body.coverImage || '');
+        if (req.body.sortOrder != null) update.sortOrder = Number(req.body.sortOrder) || 0;
+        await StashFolder.updateOne({ id: folderId }, { $set: update });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.delete('/api/admin/stash/folders/:id', checkAdminPwd, async (req, res) => {
+    try {
+        const folderId = req.params.id;
+        const existing = await StashFolder.findOne({ id: folderId }).lean();
+        if (!existing) return res.status(404).json({ error: 'Not found' });
+        const parentId = String(existing.parentId || '');
+        await StashFolder.updateMany({ parentId: folderId }, { $set: { parentId } });
+        await StashItem.updateMany({ folderId }, { $set: { folderId: parentId } });
+        await StashFolder.deleteOne({ id: folderId });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.get('/api/admin/stash', checkAdminPwd, async (req, res) => {
     try {
         const rows = await StashItem.find().lean();
@@ -772,10 +938,11 @@ app.post('/api/admin/stash', checkAdminPwd, async (req, res) => {
     try {
         const err = validateStashBody(req.body);
         if (err) return res.status(400).json({ error: err });
-        const { kind, title, body, link, images, mediaData, mediaGridId, mediaName, mediaMime, displayYear, displayMonth, displayDay } = req.body;
+        const { kind, title, body, link, images, mediaData, mediaGridId, mediaName, mediaMime, displayYear, displayMonth, displayDay, folderId } = req.body;
         await StashItem.create({
             id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
             kind: String(kind),
+            folderId: folderId != null ? String(folderId).trim() : '',
             title: title != null ? String(title) : '',
             body: body != null ? String(body) : '',
             link: link != null ? String(link).trim() : '',
@@ -811,7 +978,8 @@ app.put('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
             mediaMime: req.body.mediaMime !== undefined ? req.body.mediaMime : (existing.mediaMime || ''),
             displayYear: req.body.displayYear != null ? req.body.displayYear : existing.displayYear,
             displayMonth: req.body.displayMonth != null ? req.body.displayMonth : existing.displayMonth,
-            displayDay: req.body.displayDay != null ? req.body.displayDay : existing.displayDay
+            displayDay: req.body.displayDay != null ? req.body.displayDay : existing.displayDay,
+            folderId: req.body.folderId != null ? req.body.folderId : (existing.folderId || '')
         };
         const err = validateStashBody(merged);
         if (err) return res.status(400).json({ error: err });
@@ -828,6 +996,7 @@ app.put('/api/admin/stash/:id', checkAdminPwd, async (req, res) => {
         if (req.body.displayYear != null) update.displayYear = Number(req.body.displayYear);
         if (req.body.displayMonth != null) update.displayMonth = Number(req.body.displayMonth);
         if (req.body.displayDay != null) update.displayDay = Number(req.body.displayDay);
+        if (req.body.folderId != null) update.folderId = String(req.body.folderId).trim();
         const nextGridId = update.mediaGridId !== undefined ? update.mediaGridId : (existing.mediaGridId || '');
         const prevGridId = existing.mediaGridId || '';
         if (prevGridId && prevGridId !== nextGridId) {
