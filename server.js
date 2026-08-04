@@ -42,7 +42,14 @@ app.use((req, res, next) => {
     next();
 });
 
-app.use(compression());
+// Skip compression for binary media streams so Range responses stay intact.
+// 媒体二进制流跳过 gzip，避免破坏 Range 分段响应。
+app.use(compression({
+    filter: (req, res) => {
+        if (/^\/api\/public\/stash\/media\//i.test(req.path)) return false;
+        return compression.filter(req, res);
+    }
+}));
 app.use(express.json({ limit: '25mb' }));
 
 // Throttle repeated failed password attempts to blunt admin/visitor brute force.
@@ -230,7 +237,7 @@ const blogPostSchema = new mongoose.Schema({
 });
 const BlogPost = mongoose.model('BlogPost', blogPostSchema);
 
-const STASH_KINDS = ['photo', 'video', 'article', 'note'];
+const STASH_KINDS = ['photo', 'video', 'audio', 'article', 'note'];
 
 const stashItemSchema = new mongoose.Schema({
     id: String,
@@ -721,7 +728,7 @@ async function stashFolderDescendantIds(rootId) {
 function validateStashBody(body) {
     const kind = body.kind != null ? String(body.kind) : '';
     if (!STASH_KINDS.includes(kind)) {
-        return 'Kind must be photo, video, article, or note';
+        return 'Kind must be photo, video, audio, article, or note';
     }
     const title = body.title != null ? String(body.title).trim() : '';
     const text = body.body != null ? String(body.body).trim() : '';
@@ -736,6 +743,9 @@ function validateStashBody(body) {
     }
     if (kind === 'video' && !link && !hasMedia) {
         return 'Video needs a YouTube/Vimeo link or an uploaded video file';
+    }
+    if (kind === 'audio' && !hasMedia) {
+        return 'Audio needs an uploaded MP3 (or other audio) file';
     }
     if (kind === 'article' && !title && !text && !link && !hasMedia) {
         return 'Article needs a title, body, link, or PDF';
@@ -782,6 +792,10 @@ app.post('/api/admin/stash/media', checkAdminPwd, (req, res) => {
     });
 });
 
+// Public media stream for stash uploads. Supports HTTP Range so browsers can
+// seek and play audio/video reliably (especially Safari and Chrome media elements).
+// 零碎架上传媒体的公开流接口。支持 HTTP Range，便于浏览器可靠拖动进度与播放
+//（尤其是 Safari 与 Chrome 的媒体元素）。
 app.get('/api/public/stash/media/:id', async (req, res) => {
     try {
         const bucket = getStashMediaBucket();
@@ -790,10 +804,40 @@ app.get('/api/public/stash/media/:id', async (req, res) => {
         if (!files.length) return res.status(404).json({ error: 'Not found' });
         const file = files[0];
         const mime = (file.metadata && file.metadata.mime) || file.contentType || 'application/octet-stream';
+        const size = Number(file.length) || 0;
+        const filename = String(file.filename || 'file').replace(/["\r\n]/g, '');
+
         res.setHeader('Content-Type', mime);
         res.setHeader('Cache-Control', 'public, max-age=86400');
-        const filename = String(file.filename || 'file').replace(/["\r\n]/g, '');
+        res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+
+        const rangeHeader = req.headers.range;
+        if (rangeHeader && size > 0) {
+            const match = String(rangeHeader).match(/bytes=(\d*)-(\d*)/);
+            if (!match) {
+                res.status(416);
+                res.setHeader('Content-Range', `bytes */${size}`);
+                return res.end();
+            }
+            let start = match[1] !== '' ? parseInt(match[1], 10) : 0;
+            let end = match[2] !== '' ? parseInt(match[2], 10) : (size - 1);
+            if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start >= size || start > end) {
+                res.status(416);
+                res.setHeader('Content-Range', `bytes */${size}`);
+                return res.end();
+            }
+            end = Math.min(end, size - 1);
+            const chunkSize = end - start + 1;
+            res.status(206);
+            res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+            res.setHeader('Content-Length', String(chunkSize));
+            // openDownloadStream end is exclusive.
+            // openDownloadStream 的 end 为开区间上界。
+            return bucket.openDownloadStream(fileId, { start, end: end + 1 }).pipe(res);
+        }
+
+        if (size > 0) res.setHeader('Content-Length', String(size));
         bucket.openDownloadStream(fileId).pipe(res);
     } catch (e) {
         res.status(404).json({ error: 'Not found' });
