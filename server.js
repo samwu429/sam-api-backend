@@ -794,8 +794,11 @@ app.post('/api/admin/stash/media', checkAdminPwd, (req, res) => {
 
 // Public media stream for stash uploads. Supports HTTP Range so browsers can
 // seek and play audio/video reliably (especially Safari and Chrome media elements).
+// Pass ?download=1 to force Content-Disposition: attachment so the browser saves
+// the file locally instead of opening it as a new page.
 // 零碎架上传媒体的公开流接口。支持 HTTP Range，便于浏览器可靠拖动进度与播放
-//（尤其是 Safari 与 Chrome 的媒体元素）。
+//（尤其是 Safari 与 Chrome 的媒体元素）。加 ?download=1 时改为 attachment，
+// 让浏览器直接保存到本地而不是新开页面打开。
 app.get('/api/public/stash/media/:id', async (req, res) => {
     try {
         const bucket = getStashMediaBucket();
@@ -805,15 +808,25 @@ app.get('/api/public/stash/media/:id', async (req, res) => {
         const file = files[0];
         const mime = (file.metadata && file.metadata.mime) || file.contentType || 'application/octet-stream';
         const size = Number(file.length) || 0;
-        const filename = String(file.filename || 'file').replace(/["\r\n]/g, '');
+        let filename = String(file.filename || 'file').replace(/["\r\n]/g, '');
+        const forceDownload = String(req.query.download || '') === '1' || String(req.query.download || '').toLowerCase() === 'true';
+        if (forceDownload) {
+            const lower = filename.toLowerCase();
+            if (/^audio\//i.test(mime) && !/\.(mp3|m4a|wav|ogg|aac|flac)$/i.test(lower)) {
+                filename = `${filename || 'audio'}.mp3`;
+            } else if (/pdf/i.test(mime) && !/\.pdf$/i.test(lower)) {
+                filename = `${filename || 'document'}.pdf`;
+            }
+        }
 
         res.setHeader('Content-Type', mime);
         res.setHeader('Cache-Control', 'public, max-age=86400');
         res.setHeader('Accept-Ranges', 'bytes');
-        res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+        const disposition = forceDownload ? 'attachment' : 'inline';
+        res.setHeader('Content-Disposition', `${disposition}; filename="${filename}"`);
 
         const rangeHeader = req.headers.range;
-        if (rangeHeader && size > 0) {
+        if (rangeHeader && size > 0 && !forceDownload) {
             const match = String(rangeHeader).match(/bytes=(\d*)-(\d*)/);
             if (!match) {
                 res.status(416);
